@@ -1,22 +1,19 @@
 // Educational/Testing YouTube Downloader API
 // STRICTLY FOR PRIVATE TESTING PURPOSES ONLY
 
-import fs from 'fs';
-import path from 'path';
-import ytdl from 'ytdl-core';
+const fs = require('fs');
+const path = require('path');
+const ytdl = require('ytdl-core');
 
-// Disable Vercel body parsing for proper streaming
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   // Only allow GET requests
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed. Use GET.' });
   }
+
+  // Disable body parsing for proper streaming
+  req.on('data', () => {});
+  req.on('end', () => {});
 
   try {
     const { url } = req.query;
@@ -24,51 +21,57 @@ export default async function handler(req, res) {
     // 1. Validate required parameters
     if (!url) {
       return res.status(400).json({ 
-        error: 'Missing required parameter: url' 
+        error: 'Missing required parameter: url',
+        usage: '/api/download?url=YOUTUBE_URL'
       });
     }
 
     // 2. Validate YouTube URL format
     if (!ytdl.validateURL(url)) {
       return res.status(400).json({ 
-        error: 'Invalid YouTube URL format' 
+        error: 'Invalid YouTube URL format',
+        example: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
       });
     }
 
     // 3. Load cookies from file (for private testing only)
     const cookiesPath = path.join(process.cwd(), 'cookies.txt');
+    let cookieHeader = '';
     
     // Check if cookies file exists
     if (!fs.existsSync(cookiesPath)) {
       console.warn('Cookies file not found. Proceeding without authentication cookies.');
-    }
-
-    let cookieHeader = '';
-    
-    if (fs.existsSync(cookiesPath)) {
+    } else {
       try {
         // Read cookies file
         const cookiesContent = fs.readFileSync(cookiesPath, 'utf8');
         
         // Parse cookies.txt format (Netscape format)
-        // Each line: domain \t flag \t path \t secure \t expiration \t name \t value
         const cookieLines = cookiesContent.split('\n');
+        const cookies = [];
         
-        // Extract cookie name-value pairs, skipping comments and empty lines
-        const cookies = cookieLines
-          .filter(line => line.trim() && !line.startsWith('#') && !line.startsWith('//'))
-          .map(line => {
-            const parts = line.split('\t');
-            if (parts.length >= 7) {
-              return `${parts[5]}=${parts[6]}`;
+        for (const line of cookieLines) {
+          const trimmedLine = line.trim();
+          
+          // Skip comments and empty lines
+          if (!trimmedLine || trimmedLine.startsWith('#') || trimmedLine.startsWith('//')) {
+            continue;
+          }
+          
+          const parts = trimmedLine.split('\t');
+          if (parts.length >= 7) {
+            const cookieName = parts[5];
+            const cookieValue = parts[6];
+            if (cookieName && cookieValue) {
+              cookies.push(`${cookieName}=${cookieValue}`);
             }
-            return null;
-          })
-          .filter(cookie => cookie !== null);
+          }
+        }
         
         // Combine all cookies into single header string
         if (cookies.length > 0) {
           cookieHeader = cookies.join('; ');
+          console.log(`Loaded ${cookies.length} cookies from file`);
         }
       } catch (cookieError) {
         console.error('Error reading cookies file:', cookieError.message);
@@ -81,66 +84,77 @@ export default async function handler(req, res) {
     
     if (cookieHeader) {
       requestOptions.headers = {
-        'Cookie': cookieHeader
+        'Cookie': cookieHeader,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       };
     }
 
-    // 5. Get video info first (for validation)
+    // 5. Get video info first (for validation and filename)
+    console.log(`Processing video: ${url}`);
     const info = await ytdl.getInfo(url, { requestOptions });
     
-    // 6. Find lowest quality MP4 format for testing
-    // Filter for MP4 formats with video and audio
-    const formats = info.formats.filter(format => 
-      format.container === 'mp4' && 
-      format.hasVideo && 
-      format.hasAudio
-    );
+    // 6. Find available formats
+    const formats = ytdl.filterFormats(info.formats, 'videoandaudio');
     
     if (formats.length === 0) {
-      return res.status(400).json({ 
-        error: 'No MP4 format available for this video' 
-      });
+      // Fallback to any format with video
+      const videoFormats = info.formats.filter(format => format.hasVideo);
+      if (videoFormats.length === 0) {
+        return res.status(400).json({ 
+          error: 'No downloadable format available for this video' 
+        });
+      }
+      
+      // Use the first available video format
+      var selectedFormat = videoFormats[0];
+    } else {
+      // Use ytdl-core's built-in quality selector for lowest
+      var selectedFormat = formats[0];
     }
-    
-    // Sort by quality (lowest first) for testing
-    const sortedFormats = formats.sort((a, b) => {
-      const getHeight = (format) => format.height || 0;
-      return getHeight(a) - getHeight(b);
-    });
-    
-    // Select the lowest quality MP4
-    const selectedFormat = sortedFormats[0];
 
     // 7. Set response headers for download
     const safeFilename = info.videoDetails.title
-      .replace(/[^a-z0-9]/gi, '_')
-      .substring(0, 50) || 'video';
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, '_')
+      .substring(0, 100) || 'video';
     
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}.mp4"`);
-    res.setHeader('Content-Length', selectedFormat.contentLength || 'unknown');
+    
+    // Optional: Set content length if available
+    if (selectedFormat.contentLength) {
+      res.setHeader('Content-Length', selectedFormat.contentLength);
+    }
 
     // 8. Stream video directly to response
+    console.log(`Starting download: ${info.videoDetails.title}`);
+    console.log(`Selected quality: ${selectedFormat.qualityLabel || selectedFormat.quality}`);
+    
     const videoStream = ytdl(url, {
       format: selectedFormat,
       requestOptions,
-      // Quality selection for educational/testing purposes
       quality: 'lowest',
     });
 
-    // Handle stream events
+    // Handle stream errors
     videoStream.on('error', (streamError) => {
       console.error('Stream error:', streamError.message);
       if (!res.headersSent) {
-        res.status(500).json({ error: 'Stream failed' });
+        res.status(500).json({ error: 'Stream failed', details: streamError.message });
       }
     });
 
     // Pipe video stream to response
     videoStream.pipe(res);
 
+    // Handle successful completion
+    videoStream.on('end', () => {
+      console.log('Download completed successfully');
+    });
+
     // Handle client disconnect
     req.on('close', () => {
+      console.log('Client disconnected');
       videoStream.destroy();
     });
 
@@ -150,19 +164,28 @@ export default async function handler(req, res) {
     // Provide appropriate error responses
     if (error.message.includes('private') || error.message.includes('unavailable')) {
       return res.status(403).json({ 
-        error: 'Video unavailable. This might require authentication.' 
+        error: 'Video is private or unavailable',
+        note: 'If testing private videos, ensure cookies.txt contains valid authentication cookies'
       });
     }
     
-    if (error.message.includes('cookies')) {
+    if (error.message.includes('cookies') || error.message.includes('authentication')) {
       return res.status(403).json({ 
-        error: 'Authentication required. Check cookies.txt file.' 
+        error: 'Authentication required',
+        note: 'Check cookies.txt file for valid YouTube session cookies'
+      });
+    }
+    
+    if (error.message.includes('format')) {
+      return res.status(400).json({ 
+        error: 'No supported format available',
+        details: error.message 
       });
     }
     
     res.status(500).json({ 
       error: 'Failed to process download request',
-      details: error.message 
+      details: error.message.substring(0, 100) // Limit error details length
     });
   }
-}
+};
