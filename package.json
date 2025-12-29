@@ -1,0 +1,23 @@
+{
+  "name": "youtube-downloader-api-testing",
+  "version": "1.0.0",
+  "description": "Educational/Testing YouTube downloader API using Vercel serverless functions",
+  "main": "api/download.js",
+  "scripts": {
+    "test": "echo \"For testing only - educational purposes\""
+  },
+  "keywords": [
+    "educational",
+    "testing",
+    "youtube",
+    "api"
+  ],
+  "author": "Educational Testing",
+  "license": "MIT",
+  "dependencies": {
+    "ytdl-core": "^4.11.5"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
